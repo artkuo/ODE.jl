@@ -181,8 +181,11 @@ end # ode23
 # CompereM@asme.org
 # created : 06 October 1999
 # modified: 17 January 2001
-function oderkf(F, x0, tspan, p, a, bs, bp; reltol = 1.0e-5, abstol = 1.0e-8)
+function oderkf(F, x0, tspan, p, a, bs, bp; reltol = 1.0e-5, abstol = 1.0e-8,
+  eventfun = None, eventargs = None nonnegativeids = [])
     # see p.91 in the Ascher & Petzold reference for more infomation.
+    # p = polynomial order, a = matrix of coefficients, bs = b coefficients low,
+    # bp = b coefficients high
     pow = 1/p   # use the higher order to estimate the next step size
 
     c = sum(a, 2)   # consistency condition
@@ -202,9 +205,9 @@ function oderkf(F, x0, tspan, p, a, bs, bp; reltol = 1.0e-5, abstol = 1.0e-8)
     k = Array(typeof(x0), length(c))
     k[1] = F(t,x) # first stage
 
-    while abs(t) != abs(tfinal) && abs(h) >= hmin
-        if abs(h) > abs(tfinal-t)
-            h = tfinal - t
+    while abs(t) != abs(tfinal) && abs(h) >= hmin  # MAIN LOOP
+        if abs(h) > abs(tfinal-t) # step takes us past tfinal
+            h = tfinal - t        # adjust it so it takes us there exactly
         end
 
         #(p-1)th and pth order estimates
@@ -232,8 +235,60 @@ function oderkf(F, x0, tspan, p, a, bs, bp; reltol = 1.0e-5, abstol = 1.0e-8)
 
         # Update the solution only if the error is acceptable
         if delta <= tau
-            t = t + h
-            x = xp    # <-- using the higher order estimate is called 'local extrapolation'
+            tnew = t + h
+            xnew = xp    # <-- using the higher order estimate is called 'local extrapolation'
+
+            # Check events to see if there's a zero-crossing in this time step
+            if haveevents
+              (te, xe, ie, valt, stop) = odeevent(ntrp45, eventfun, eventargs,
+                valt, t, x, tnew, xnew, t0, h, k, nonnegativeids)
+              if !isempty(te) # event detected, so zero in on it
+                push!(teout, te)
+                push!(xeout, xe)
+                push!(ieout, ie)
+                if stop # event isterminal, so interpolate to te
+                  taux = t + (te[end] - t)*c # use interpolating polynomial
+                  # between now and the event time
+                  (_, k[:,2:7]) =
+                    ntrp45(taux, t, x, None, None, h, k, nonnegativeids)
+                  tnew = te[end]
+                  xnew = xe[:,end]
+                  h = tnew - t
+                  done = true
+                end
+
+              end # event detected
+
+              #function odeevent(ntrpfun::Function, eventfun::Function, eventargs,
+              #  v, t, x, tnew, xnew, t0, args...)
+              #function ntrp45(tinterp,t,y,tnew,ynew,h,k; nonnegativeids::Array=[], derivs=false)
+
+            # if haveEventFcn
+            #   [te,ye,ie,valt,stop] = ...
+            #       odezero(@ntrp45,eventFcn,eventArgs,valt,t,y,tnew,ynew,t0,h,f,idxNonNegative);
+            #   if ~isempty(te)
+            #     if output_sol || (nargout > 2)
+            #       teout = [teout, te];
+            #       yeout = [yeout, ye];
+            #       ieout = [ieout, ie];
+            #     end
+            #     if stop               % Stop on a terminal event.
+            #       % Adjust the interpolation data to [t te(end)].
+            #
+            #       % Update the derivatives using the interpolating polynomial.
+            #       taux = t + (te(end) - t)*A;
+            #       [~,f(:,2:7)] = ntrp45(taux,t,y,[],[],h,f,idxNonNegative);
+            #
+            #       tnew = te(end);
+            #       ynew = ye(:,end);
+            #       h = tnew - t;
+            #       done = true;
+            #     end
+            #   end
+            # end
+
+            t = tnew
+            x = xnew
             tout = [tout; t]
             push!(xout, x)
 
@@ -250,17 +305,18 @@ function oderkf(F, x0, tspan, p, a, bs, bp; reltol = 1.0e-5, abstol = 1.0e-8)
                 k[1] = F(t,x) # first stage
             end
         end
-
         # Update the step size
         h = min(hmax, 0.8*h*(tau/delta)^pow)
-    end # while (t < tfinal) & (h >= hmin)
+    end # while (t < tfinal) & (h >= hmin)       MAIN LOOP
+    println(k)
+    println(typeof(k))
 
     if abs(t) < abs(tfinal)
       println("Step size grew too small. t=", t, ", h=", abs(h), ", x=", x)
     end
 
     return tout, xout
-end
+end # oderkf
 
 # Bogacki–Shampine coefficients
 const bs_coefficients = (3,
@@ -510,7 +566,7 @@ function ode_ms(F, x0, tspan, order::Integer)
             for j = 0:s
                 # Assign in correct order for multiplication below
                 #                    (a factor depending on j and s)      .* (an integral of a polynomial with -(0:s), except -j, as roots)
-                b[steporder,s-j+1] = (-1).^j./factorial(j)./factorial(s-j).*diff(polyval(polyint(poly(diagm(-[0:j-1; j+1:s]))),0:1))
+                b[steporder,s-j+1] = (-1).^j./factorial[j]./factorial(s-j).*diff(polyval(polyint(poly(diagm(-[0:j-1; j+1:s]))),0:1))
             end
         end
     end
@@ -533,4 +589,330 @@ end
 # Use order 4 by default
 ode4ms(F, x0, tspan) = ode_ms(F, x0, tspan, 4)
 
+function mycumprod(x)
+    y = copy(x)
+    for i = 2:length(syx)
+        y[i] = y[i-1] .* x[i]
+    end
+    return y
+end
+
+#function ntrp45(tinterp,t,y::Array,tnew,ynew::Array,h,k::Array; nonnegativeids::Array=[], derivs=false)
+function ntrp45(tinterp,t,y,tnew,ynew,h,k; nonnegativeids::Array=[], derivs=false)
+#NTRP45  Interpolation helper function for ODE45.
+#   YINTERP = NTRP45(TINTERP,T,Y,TNEW,YNEW,H,F,IDX) uses data computed in ODE45
+#   to approximate the solution at time TINTERP.  TINTERP may be a scalar
+#   or a row vector.
+#   The arguments TNEW and YNEW do not affect the computations. They are
+#   required for consistency of syntax with other interpolation functions.
+#   Any values entered for TNEW and YNEW are ignored.
+#   t = current time, y = current y
+#   h = current step size
+#   F = matrix of values (N x 7) where N is order of system
+#   similar to k = array of arrays (7 x N)
+#
+#   [YINTERP,YPINTERP] = NTRP45(TINTERP,T,Y,TNEW,YNEW,H,F,IDX) returns also the
+#   derivative of the polynomial approximating the solution.
+#
+#   IDX has indices of solution components that must be non-negative. Negative
+#   YINTERP(IDX) are replaced with zeros and the derivative YPINTERP(IDX) is
+#   set to zero.
+#
+#   See also ODE45, DEVAL.
+
+#   Mark W. Reichelt and Lawrence F. Shampine, 6-13-94
+#   Copyright 1984-2009 The MathWorks, Inc.
+#   $Revision: 1.13.4.7 $  $Date: 2009/11/16 22:26:19 $
+
+# from Jimenez JC, Sotolongo A, Sanchez-Bornot JM (2014)
+# Localy linearized Runge Kutta method of Dormand and Prince
+# Applied Mathematics & Computation 247: 589-606, Table 2
+#
+const  BI = [
+      1       -183/64      37/12       -145/128
+      0          0           0            0
+      0       1500/371    -1000/159    1000/371
+      0       -125/32       125/12     -375/64
+      0       9477/3392   -729/106    25515/6784
+      0        -11/7        11/3        -55/28
+      0         3/2         -4            5/2
+      ]
+
+  Ntimes = length(tinterp) # may be fed a scalar time or an array of times
+
+  s = (tinterp' - t)/h  # row of interpolation time pts
+  # normalized by h for numerical precision because
+  # we're going to take this to the fourth power
+
+# y + h * sum(b_j(tau) k_j)
+  cinterp = h*BI*cumprod([s;s;s;s]) # interpolation coefficients
+
+  yinterp = [y + cinterp[:,i]'*k for i=1:Ntimes]
+
+  cpinterp = BI*[ones(1,Ntimes); cumprod([2*s;3/2*s;4/3*s])]
+
+  if derivs # nargout > 1
+    ypinterp = [0*y + cpinterp[:,i]'*k for i=1:Ntimes]
+    # the 0*y is needed to ensure the type is an array
+  end
+
+# Zero out non-negative solutions
+  for i in nonnegativeids
+    for j = 1:Ntimes
+      if yinterp[j][i] < 0
+        yinterp[j][i] = 0
+        if getderiv
+          ypinterp[j][i] = 0
+        end
+      end
+    end # loop over interpolated times
+  end # loop over non-negative indices
+
+  if derivs
+    return yinterp,ypinterp
+  else
+    return yinterp
+  end # getderiv
+
+end # ntrp45
+
+
+# function [tout,yout,iout,vnew,stop] = ...
+#     odezero(ntrpfun,eventfun,eventargs,v,t,y,tnew,ynew,t0,varargin)
+function odeevent(ntrpfun::Function, eventfun::Function, eventargs,
+  v, t, x, tnew, xnew, t0, args...)
+# ODEEVENT Locate any zero-crossings of event functions in a time step.
+#   ODEEVENT is an event location helper function for the ODE Suite.  ODEEVENT
+#   uses Regula Falsi and information passed from the ODE solver to locate
+#   any zeros in the half open time interval (T,TNEW] of the event functions
+#   coded in eventfun.
+
+# improve zhang's http://www.cscjournals.org/csc/manuscript/Journals/IJEA/volume4/Issue1/IJEA-33.pdf
+# num recipes code: http://apps.nrbook.com/empanel/index.html#pg=454
+# wikipedia http://en.wikipedia.org/wiki/Brent%27s_method
+# wikipedia http://en.wikipedia.org/wiki/Ridders%27_method (sq rt)
+
+
+# Initialize
+  tol = 128*max(eps(t),eps(tnew))
+  tol = min(tol, abs(tnew - t))
+  tout = []
+  xout = []
+  iout = []
+  tdir = sign(tnew - t) # are we integrating fwd or bwd in time
+  stop = 0
+  rmin = realmin(v)
+
+  # Set up tL, tR, xL, xR, vL, vR, isterminal and direction.
+  tL, xL, vL = t, x, v
+  (vnew,isterminal,direction) = feval(eventfun,tnew,xnew,eventargs...)
+  if isempty(direction)
+    direction = zeros(vnew)   # zeros crossings in any direction
+  end
+  tR, xR, vR = tnew, xnew, vnew
+
+  # Initialize ttry so that we won't extrapolate if vL or vR is zero.
+  ttry = tR
+
+  # Find all events before tnew or the first terminal event.
+  while true # Outer while
+
+    lastmoved = 0
+    while true     # Inner while: Bracket in until we reach tolerance
+      #      detect   zero-crossing             in the intended direction
+      indzc = find((sign(vL) != sign(vR)) && (direction .* (vR - vL) >= 0))
+      # Events of interest shouldn't have disappeared, but new ones might
+      # be found in other elements of the v vector:
+      if isempty(indzc)    # nothing in bracket
+        if lastmoved != 0  # but we had one that we were trying to close in on
+          error("ODEEVENT: lost event") # which evidently disappeared
+        end
+        # seems like there are no events so go home
+        return tout,xout,iout,vnew,stop
+      end
+
+      # Check if the time interval is too short to continue looking.
+      bracketwidtht = tR - tL
+      if abs(bracketwidtht) <= tol
+        break # give up, only small steps to perform here
+      end
+
+      # are we sitting on an event (at left bracket, with non-event at right?)
+      if (tL == t) && any(vL[indzc] == 0. & vR[indzc] != 0.)
+        ttry = tL + tdir*0.5*tol # then try to move forward a tiny bit
+
+      else # try to bracket inward
+        # Compute Regula Falsi change, using leftmost possibility.
+        change = 1
+        for j in indzc
+          # If either bracket is stuck on zero, try using old bracket to guess
+          # a crossing or departure from zero.
+          if vL[j] == 0.0 # left bracket stuck on zero?
+            # did we previously move the right bracket in?
+            if (tdir*ttry > tdir*tR) && (vtry[j] != vR[j])
+              # then use the two rights (vtry, vR) to get a secant solution
+              # to serve as the next guess
+              maybe = 1.0 - vR[j] * (ttry-tR) / ((vtry[j]-vR[j]) * bracketwidtht)
+              if (maybe < 0) || (maybe > 1) # avoid going outside bracket
+                 maybe = 0.5 # so conservatively fall back on bisection
+              end
+            else # also fall back on bisection we had either moved the left
+              maybe = 0.5 # bracket or if no deriv to be gained from right
+            end
+          elseif vR[j] == 0.0 # stuck on zero at vR
+            if (tdir*ttry < tdir*tL) && (vtry[j] != vL[j])
+              maybe = vL[j] * (tL-ttry) / ((vtry[j]-vL[j]) * bracketwidtht)
+              if (maybe < 0) || (maybe > 1)
+                maybe = 0.5
+              end
+            else
+              maybe = 0.5
+            end
+
+          else # both vL and vR are non-zero, so linearly interpolate the root
+            maybe = -vL[j] / (vR[j] - vL[j]) # Note vR(j) != vL(j)
+          end
+
+          if maybe < change # accept as a change as long as it's interpolation
+            change = maybe  # fraction of the bracket where zero is expected
+          end
+        end # loop through event indices
+        changet = change * abs(bracketwidtht) # convert into the time step
+
+        # Enforce minimum and maximum change in time interval.
+        # At least a smidge over zero (0.5*tol) and at most (a smidge under)
+        # bracketwidtht
+        changet = max(0.5*tol, min(changet, abs(bracketwidtht) - 0.5*tol))
+
+        ttry = tL + tdir * changet
+      end # if need to change
+
+      # Compute vtry.
+      xtry = feval(ntrpfun,ttry,t,x,tnew,xnew,args...)
+      vtry = feval(eventfun,ttry,xtry,eventargs...)
+
+      # Check for any crossings between tL and ttry.
+      indzc = find((sign(vL) != sign(vtry)) & (direction .* (vtry - vL) >= 0))
+      if !isempty(indzc) # root appears to be to the left of ttry
+        #  Move right end of bracket leftward, remembering the old value in try
+        tR, ttry = ttry, tR
+        xR, xtry = xtry, xR
+        vR, vtry = vtry, vR
+        # Illinois method.  If we've moved leftward twice, halve
+        # vL so we'll move closer next time.
+        if lastmoved == 2
+          # Watch out for underflow and signs disappearing.
+          maybe = 0.5 * vL
+          i = find(abs(maybe) >= rmin)
+          vL[i] = maybe[i] # accept adjustments that are big enough
+        end
+        lastmoved = 2  # meaning we just moved the right bracket left
+      else # root must be to the right
+        # Move left end of bracket rightward, remembering the old value.
+        tL, ttry = ttry, tL
+        xL, xtry = xtry, xL
+        vL, vtry = vtry, vL
+        # Illinois method.  If we've moved rightward twice, halve
+        # vR so we'll move closer next time.
+        if lastmoved == 1 # already moved left bracket right
+          # Watch out for underflow and signs disappearing.
+          maybe = 0.5 * vR
+          i = find(abs(maybe) >= rmin)
+          vR[i] = maybe[i]
+        end
+        lastmoved = 1 # record that we moved the left bracket right
+      end # crossings between tL and ttry
+    end # inner while, got close
+
+    # great, now let's record the event at tR
+    j = ones(1,length(indzc))
+    push!(tout, fill(tR, length(indzc))    # tout = [tout, tR(j)]
+    push!(xout, fill(xR, [:,j])  # yout = [yout, yR(:,j)]
+    push!(iout, indzc)   # iout = [iout, indzc']
+    if any(isterminal[indzc]) # isterminal means we need to quit
+      if tL != t0 # have we gone anywhere yet? (only stop if event is past i.c.)
+        stop = 1  # this signals ode to stop
+      end
+      break # out of outer while to quit
+      # and otherwise we need to keep going
+    elseif abs(tnew - tR) <= tol # and can do so if we're close enough
+      #  We're not going to find events closer than tol.
+      break # out of outer while
+    else
+      # Shift whole bracket rightward from [tL tR] to [tR+0.5*tol tnew].
+      ttry, xtry, vtry = tR, xR, vR
+      tL = tR + tdir*0.5*tol # just a smidge past our most recent event
+      xL = feval(ntrpfun,tL,t,x,tnew,ynew,args...) # right-hand-side approx
+      vL = feval(eventfun,tL,xL,eventargs...)      # event value
+      tR, xR, vR = tnew, xR, vR
+    end # okay our event was before tnew, so keep going
+
+  end # outer while, look for next event
+
+  # one way out
+  return tout,xout,iout,vnew,stop
+  end # function odeevent
+
 end # module ODE
+
+# Doub zbrent(T &func, const Doub x1, const Doub x2, const Doub tol)
+# {
+#   const Int ITMAX=100;
+#   const Doub EPS=numeric_limits<Doub>::epsilon();
+#   Doub a=x1,b=x2,c=x2,d,e,fa=func(a),fb=func(b),fc,p,q,r,s,tol1,xm;
+#   if ((fa > 0.0 && fb > 0.0) || (fa < 0.0 && fb < 0.0))
+#     throw("Root must be bracketed in zbrent");
+#   fc=fb;
+#   for (Int iter=0;iter<ITMAX;iter++) {
+#     if ((fb > 0.0 && fc > 0.0) || (fb < 0.0 && fc < 0.0)) {
+#       c=a;
+#       fc=fa;
+#       e=d=b-a;
+#     }
+#     if (abs(fc) < abs(fb)) {
+#       a=b;
+#       b=c;
+#       c=a;
+#       fa=fb;
+#       fb=fc;
+#       fc=fa;
+#     }
+#     tol1=2.0*EPS*abs(b)+0.5*tol;
+#     xm=0.5*(c-b);
+#     if (abs(xm) <= tol1 || fb == 0.0) return b;
+#     if (abs(e) >= tol1 && abs(fa) > abs(fb)) {
+#       s=fb/fa;
+#       if (a == c) {
+#         p=2.0*xm*s;
+#         q=1.0-s;
+#       } else {
+#         q=fa/fc;
+#         r=fb/fc;
+#         p=s*(2.0*xm*q*(q-r)-(b-a)*(r-1.0));
+#         q=(q-1.0)*(r-1.0)*(s-1.0);
+#       }
+#       if (p > 0.0) q = -q;
+#       p=abs(p);
+#       Doub min1=3.0*xm*q-abs(tol1*q);
+#       Doub min2=abs(e*q);
+#       if (2.0*p < (min1 < min2 ? min1 : min2)) {
+#         e=d;
+#         d=p/q;
+#       } else {
+#         d=xm;
+#         e=d;
+#       }
+#     } else {
+#       d=xm;
+#       e=d;
+#     }
+#     a=b;
+#     fa=fb;
+#     if (abs(d) > tol1)
+#       b += d;
+#     else
+#       b += SIGN(tol1,xm);
+#       fb=func(b);
+#   }
+#   throw("Maximum number of iterations exceeded in zbrent");
+# }
